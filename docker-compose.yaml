@@ -1,0 +1,117 @@
+
+# ─── PokemonLake — Data Lake / Lakehouse ─────────────────────────────────────
+# Ports utilisés : 5434 (Postgres), 9002 (MinIO S3), 9003 (MinIO Console), 5678 (n8n)
+
+services:
+
+  # ── PostgreSQL — base de métadonnées du Data Lake ─────────────────────────
+  postgres-pokemon:
+    image: postgres:16
+    container_name: postgres-pokemon
+    environment:
+      POSTGRES_USER:     ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB:       ${POSTGRES_DB}
+    volumes:
+      - pg-pokemon-data:/var/lib/postgresql/data
+      - ./init-db/schema.sql:/docker-entrypoint-initdb.d/schema.sql
+    ports:
+      - "5434:5432"
+    networks:
+      - pokemon-net
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "${POSTGRES_USER}", "-d", "${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── MinIO — stockage objet (couche Data Lake) ─────────────────────────────
+  minio-pokemon:
+    image: minio/minio
+    container_name: minio-pokemon
+    command: server /data --console-address ":9003"
+    environment:
+      MINIO_ROOT_USER:     ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    volumes:
+      - minio-pokemon-data:/data
+    ports:
+      - "9002:9000"   # API S3 compatible
+      - "9003:9003"   # Console web
+    networks:
+      - pokemon-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ── Initialisation des buckets MinIO ──────────────────────────────────────
+  minio-pokemon-init:
+    image: minio/mc
+    container_name: minio-pokemon-init
+    depends_on:
+      minio-pokemon:
+        condition: service_healthy
+    networks:
+      - pokemon-net
+    entrypoint: >
+      /bin/sh -c "
+        until mc alias set local http://minio-pokemon:9000 ${MINIO_ROOT_USER} ${MINIO_ROOT_PASSWORD}; do
+          echo '[minio-init] MinIO pas encore prêt, retry dans 3s...';
+          sleep 3;
+        done;
+        mc mb --ignore-existing local/raw-pokemon;
+        mc mb --ignore-existing local/pokemon-images;
+        mc mb --ignore-existing local/reports;
+        mc anonymous set public local/raw-pokemon;
+        echo '[minio-init] Buckets raw-pokemon / pokemon-images / reports créés.';
+      "
+    restart: "no"
+
+  # ── n8n — orchestration des workflows d'ingestion ─────────────────────────
+  n8n-pokemon:
+    image: n8nio/n8n:latest
+    container_name: n8n-pokemon
+    environment:
+      # Paramètres d'hôte
+      N8N_HOST:     localhost
+      N8N_PORT:     5678
+      N8N_PROTOCOL: http
+      # Clé de chiffrement des credentials n8n
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
+      # Timezone pour les logs et les crons
+      GENERIC_TIMEZONE: Europe/Paris
+      # Expose les variables MinIO et Postgres au conteneur pour
+      # simplifier la configuration manuelle des credentials dans l'UI
+      MINIO_HOST:        minio-pokemon
+      MINIO_PORT:        "9000"
+      MINIO_ROOT_USER:   ${MINIO_ROOT_USER}
+      POSTGRES_HOST:     postgres-pokemon
+      POSTGRES_PORT:     "5432"
+      POSTGRES_DB:       ${POSTGRES_DB}
+      POSTGRES_USER:     ${POSTGRES_USER}
+    volumes:
+      - n8n-pokemon-data:/home/node/.n8n
+      - ./workflows:/home/node/.n8n/workflows
+    ports:
+      - "5678:5678"
+    networks:
+      - pokemon-net
+    depends_on:
+      postgres-pokemon:
+        condition: service_healthy
+      minio-pokemon:
+        condition: service_healthy
+    restart: unless-stopped
+
+# ── Volumes ───────────────────────────────────────────────────────────────────
+volumes:
+  pg-pokemon-data:
+  minio-pokemon-data:
+  n8n-pokemon-data:
+
+# ── Réseau ────────────────────────────────────────────────────────────────────
+networks:
+  pokemon-net:
+    driver: bridge

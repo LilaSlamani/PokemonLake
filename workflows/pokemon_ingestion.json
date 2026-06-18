@@ -1,0 +1,216 @@
+{
+  "name": "Pokemon Data Lake — Ingestion Bulbizarre",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "a1000000-0000-0000-0000-000000000001",
+      "name": "Déclenchement Manuel",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [200, 300]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://pokeapi.co/api/v2/pokemon/bulbasaur",
+        "options": {}
+      },
+      "id": "a1000000-0000-0000-0000-000000000002",
+      "name": "PokéAPI — GET Bulbizarre",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [420, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Prépare les métadonnées du fichier à partir de la réponse PokéAPI.\n// Le JSON brut est sérialisé en string pour être uploadé tel quel dans MinIO.\nconst pokemon = $input.first().json;\nconst now     = new Date();\nconst dateStr = now.toISOString().split('T')[0];\n\nconst fileName  = `bulbasaur_${dateStr}.json`;\nconst objectKey = `bulbasaur/${fileName}`;\nconst content   = JSON.stringify(pokemon, null, 2);\n\n// Buffer.byteLength donne la taille réelle en octets (UTF-8)\nconst sizeBytes = Buffer.byteLength(content, 'utf8');\n\nreturn [{\n  json: {\n    pokemon_id:      pokemon.id,\n    pokemon_name:    pokemon.name,\n    file_name:       fileName,\n    bucket_name:     'raw-pokemon',\n    object_key:      objectKey,\n    file_type:       'json',\n    mime_type:       'application/json',\n    file_size_bytes: sizeBytes,\n    // URL interne Docker — accessible depuis les autres services du réseau pokemon-net\n    internal_url:    `http://minio-pokemon:9000/raw-pokemon/${objectKey}`,\n    content:         content,\n    processed_at:    now.toISOString()\n  }\n}];"
+      },
+      "id": "a1000000-0000-0000-0000-000000000003",
+      "name": "Préparation Fichier et Métadonnées",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [640, 300]
+    },
+    {
+      "parameters": {
+        "method": "PUT",
+        "url": "=http://minio-pokemon:9000/raw-pokemon/{{ $json.object_key }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "aws",
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ $json.content }}",
+        "options": {}
+      },
+      "id": "a1000000-0000-0000-0000-000000000004",
+      "name": "MinIO — Upload JSON (raw-pokemon)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [860, 300],
+      "credentials": {
+        "aws": {
+          "id": "REMPLACER_PAR_ID_CREDENTIAL_AWS",
+          "name": "MinIO S3 (pokemon-lake)"
+        }
+      },
+      "notes": "Credential AWS à créer dans n8n avec : Access Key = pokemon_admin, Secret = pokemon_secret_2024, Region = us-east-1, Endpoint = http://minio-pokemon:9000"
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "schema": {
+          "__rl": true,
+          "value": "public",
+          "mode": "list"
+        },
+        "table": {
+          "__rl": true,
+          "value": "pokemon_files",
+          "mode": "list"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "pokemon_id":      "={{ $('Préparation Fichier et Métadonnées').item.json.pokemon_id }}",
+            "bucket_name":     "={{ $('Préparation Fichier et Métadonnées').item.json.bucket_name }}",
+            "object_key":      "={{ $('Préparation Fichier et Métadonnées').item.json.object_key }}",
+            "file_name":       "={{ $('Préparation Fichier et Métadonnées').item.json.file_name }}",
+            "file_type":       "={{ $('Préparation Fichier et Métadonnées').item.json.file_type }}",
+            "mime_type":       "={{ $('Préparation Fichier et Métadonnées').item.json.mime_type }}",
+            "file_size_bytes": "={{ $('Préparation Fichier et Métadonnées').item.json.file_size_bytes }}",
+            "internal_url":    "={{ $('Préparation Fichier et Métadonnées').item.json.internal_url }}"
+          }
+        },
+        "options": {
+          "queryBatching": "independently"
+        }
+      },
+      "id": "a1000000-0000-0000-0000-000000000005",
+      "name": "PostgreSQL — INSERT pokemon_files",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1080, 300],
+      "credentials": {
+        "postgres": {
+          "id": "REMPLACER_PAR_ID_CREDENTIAL_PG",
+          "name": "PostgreSQL pokemon-lake"
+        }
+      },
+      "notes": "Credential PostgreSQL à créer dans n8n avec : Host = postgres-pokemon, Port = 5432, DB = pokemon_lake, User = pokemon_user, Password = pokemon_pass_2024"
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "schema": {
+          "__rl": true,
+          "value": "public",
+          "mode": "list"
+        },
+        "table": {
+          "__rl": true,
+          "value": "file_ingestion_log",
+          "mode": "list"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "file_name":       "={{ $('Préparation Fichier et Métadonnées').item.json.file_name }}",
+            "bucket_name":     "={{ $('Préparation Fichier et Métadonnées').item.json.bucket_name }}",
+            "object_key":      "={{ $('Préparation Fichier et Métadonnées').item.json.object_key }}",
+            "source":          "pokeapi",
+            "status":          "success",
+            "file_size_bytes": "={{ $('Préparation Fichier et Métadonnées').item.json.file_size_bytes }}"
+          }
+        },
+        "options": {}
+      },
+      "id": "a1000000-0000-0000-0000-000000000006",
+      "name": "PostgreSQL — INSERT log (succès)",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1300, 300],
+      "credentials": {
+        "postgres": {
+          "id": "REMPLACER_PAR_ID_CREDENTIAL_PG",
+          "name": "PostgreSQL pokemon-lake"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "schema": {
+          "__rl": true,
+          "value": "public",
+          "mode": "list"
+        },
+        "table": {
+          "__rl": true,
+          "value": "file_ingestion_log",
+          "mode": "list"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "file_name":     "={{ $('Préparation Fichier et Métadonnées').item.json.file_name }}",
+            "bucket_name":   "={{ $('Préparation Fichier et Métadonnées').item.json.bucket_name }}",
+            "object_key":    "={{ $('Préparation Fichier et Métadonnées').item.json.object_key }}",
+            "source":        "pokeapi",
+            "status":        "error",
+            "error_message": "={{ $json.message || 'Erreur inconnue lors de l ingestion' }}"
+          }
+        },
+        "options": {}
+      },
+      "id": "a1000000-0000-0000-0000-000000000007",
+      "name": "PostgreSQL — INSERT log (erreur)",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1080, 520],
+      "credentials": {
+        "postgres": {
+          "id": "REMPLACER_PAR_ID_CREDENTIAL_PG",
+          "name": "PostgreSQL pokemon-lake"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Déclenchement Manuel": {
+      "main": [
+        [{ "node": "PokéAPI — GET Bulbizarre", "type": "main", "index": 0 }]
+      ]
+    },
+    "PokéAPI — GET Bulbizarre": {
+      "main": [
+        [{ "node": "Préparation Fichier et Métadonnées", "type": "main", "index": 0 }]
+      ]
+    },
+    "Préparation Fichier et Métadonnées": {
+      "main": [
+        [{ "node": "MinIO — Upload JSON (raw-pokemon)", "type": "main", "index": 0 }]
+      ]
+    },
+    "MinIO — Upload JSON (raw-pokemon)": {
+      "main": [
+        [{ "node": "PostgreSQL — INSERT pokemon_files", "type": "main", "index": 0 }],
+        [{ "node": "PostgreSQL — INSERT log (erreur)", "type": "main", "index": 0 }]
+      ]
+    },
+    "PostgreSQL — INSERT pokemon_files": {
+      "main": [
+        [{ "node": "PostgreSQL — INSERT log (succès)", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "errorWorkflow": ""
+  },
+  "id": "pokemon-datalake-workflow-v1",
+  "meta": {
+    "instanceId": "pokemon-lake-local"
+  }
+}
